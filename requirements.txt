@@ -1,0 +1,9 @@
+# Data building, evaluation and export helpers. PaddlePaddle / PaddleOCR / PaddleX are installed by the notebook
+# (they need a CUDA-specific wheel), so they are not listed here.
+numpy
+pillow
+pymupdf
+pyyaml
+fonttools
+rapidfuzz
+datasets

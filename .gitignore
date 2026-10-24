@@ -1,0 +1,7 @@
+# Datasets, fonts, checkpoints and exports are rebuilt by the notebook; never commit them.
+data/
+fonts/
+output/
+**/__pycache__/
+*.egg-info/
+.DS_Store

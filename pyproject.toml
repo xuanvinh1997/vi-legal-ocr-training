@@ -1,0 +1,28 @@
+[project]
+name = "ocr-train"
+version = "0.1.0"
+description = "Fine-tune a small PaddleOCR stack (detection, recognition, layout) on Vietnamese legal documents"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pillow",
+  "pymupdf",
+  "pyyaml",
+  "fonttools",
+  "rapidfuzz",
+  "datasets",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ocr_train"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
