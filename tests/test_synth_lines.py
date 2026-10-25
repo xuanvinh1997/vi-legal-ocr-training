@@ -31,3 +31,16 @@ def test_build_lines(tmp_path):
         assert set(text) <= allowed and text == charset.normalize(text)
         img = Image.open(tmp_path / "rec" / rel)
         assert img.height >= 12 and img.width >= 12
+
+
+def test_extra_shard_keeps_first_run_and_validation(tmp_path):
+    corpus = _corpus(tmp_path)
+    synth_lines.build(tmp_path / "rec", corpus, FONTS, 40, workers=1, val_ratio=0.2)
+    first = {f: (tmp_path / "rec/synth_lines" / f).read_bytes() for f in ("train.txt", "val.txt")}
+    image = tmp_path / "rec/synth_lines/images/00000000.jpg"
+    before = image.read_bytes()
+    stats = synth_lines.build(tmp_path / "rec", corpus, FONTS, 40, workers=1, seed=1, val_ratio=0.0, shard="synth_lines_r2")
+    assert stats["val"] == 0 and stats["train"] >= 30
+    assert {f: (tmp_path / "rec/synth_lines" / f).read_bytes() for f in first} == first and image.read_bytes() == before
+    assert (tmp_path / "rec/synth_lines_r2/images/00000000.jpg").exists()
+    assert all(l.startswith("synth_lines_r2/") for l in (tmp_path / "rec/synth_lines_r2/train.txt").read_text(encoding="utf-8").splitlines())

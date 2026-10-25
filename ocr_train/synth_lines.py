@@ -31,6 +31,7 @@ class LineJob:
     max_chars: int
     val_ratio: float
     level: float
+    shard: str
 
 
 def sample_text(snippets, rng: random.Random, max_chars: int) -> str:
@@ -52,7 +53,7 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
     docs = corpus.load_corpus(job.corpus_path)
     snippets = corpus.sentences(docs, rng, 3, job.max_chars)
     allowed = set(charset.build_charset())
-    out_dir = Path(job.root) / SHARD / "images"
+    out_dir = Path(job.root) / job.shard / "images"
     out_dir.mkdir(parents=True, exist_ok=True)
     train, val = [], []
     for k in range(job.count):
@@ -65,7 +66,7 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
         italic = rng.random() < 0.08
         font = load_font(str(family.path(bold, italic)), rng.randint(24, 56))
         img = degrade(render_line(text, font, rng), rng, job.level)
-        rel = f"{SHARD}/images/{n:08d}.jpg"
+        rel = f"{job.shard}/images/{n:08d}.jpg"
         img.save(Path(job.root) / rel, quality=rng.randint(85, 95))
         (val if is_val(str(n), job.val_ratio) else train).append(f"{rel}\t{text}")
     return train, val
@@ -73,15 +74,16 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
 
 def build(root: str | Path, corpus_path: str | Path, fonts_dir: str | Path, count: int, *, workers: int = 2,
           seed: int = 0, max_chars: int = 100, val_ratio: float = 0.01, level: float = 1.0,
-          extra_fonts: list[str] = ()) -> dict[str, int]:
+          extra_fonts: list[str] = (), shard: str = SHARD) -> dict[str, int]:
+    """`shard` + a new `seed` add data next to an earlier run instead of overwriting it; `val_ratio=0` keeps the validation set unchanged."""
     ensure_fonts(fonts_dir, list(extra_fonts))  # download once, before the workers race for it
     shards = max(1, workers * 4)
     per = -(-count // shards)
-    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level) for i in range(shards)]
+    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level, shard) for i in range(shards)]
     results = run_parallel(_work, jobs, workers)
     train = [l for t, _ in results for l in t]
     val = [l for _, v in results for l in v]
-    base = Path(root) / SHARD
+    base = Path(root) / shard
     base.mkdir(parents=True, exist_ok=True)
     write_lines(base / "train.txt", train)
     write_lines(base / "val.txt", val)

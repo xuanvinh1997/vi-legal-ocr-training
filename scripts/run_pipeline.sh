@@ -3,6 +3,10 @@
 #
 #   PHASES="setup data install rec det layout export" bash run_pipeline.sh      (all knobs below are environment variables)
 #
+# A second round (more data, a bigger GPU) never overwrites the first: `more` writes new shards, and a recognition run with
+# REC_TAG=rec_r2 INIT_FROM=rec/best_accuracy starts from the first run's weights and trains into its own directory.
+#   PHASES="setup install more rec" REC_TAG=rec_r2 INIT_FROM=rec/best_accuracy MORE_LINES=400000 REC_BATCH=128 bash run_pipeline.sh
+#
 # Why venvs: Colab's system Python (3.13) has no wheel for paddle2onnx 2.0.2rc3, and GPU builds of Paddle write `linear_v2`
 # operators that paddle2onnx cannot convert. So training runs in a Python 3.12 venv with the GPU build, and export + ONNX run
 # in a second 3.12 venv with the CPU build.
@@ -12,6 +16,8 @@ set -uo pipefail
 : "${SIZE:=small}" "${CORPUS_DOCS:=3000}" "${SYNTH_LINES:=300000}" "${SYNTH_PAGES:=4000}" "${PDF_DIR:=}" "${PDF_REPEAT:=3}" "${WORKERS:=$(nproc)}"
 : "${REC_EPOCHS:=6}" "${REC_BATCH:=32}" "${REC_EVAL:=2000}" "${DET_EPOCHS:=30}" "${DET_BATCH:=8}" "${DET_EVAL:=500}"
 : "${LAYOUT_EPOCHS:=40}" "${LAYOUT_BATCH:=8}" "${RESUME:=0}"
+: "${REC_TAG:=rec}" "${REC_LR_SCALE:=0.4}" "${INIT_FROM:=}"          # INIT_FROM: a checkpoint (relative paths are under $OUT) to continue from instead of the pretrained weights
+: "${MORE_TAG:=r2}" "${MORE_SEED:=1}" "${MORE_LINES:=0}" "${MORE_PAGES:=0}"   # extra data: shards synth_lines_$MORE_TAG / synth_pages_$MORE_TAG
 export PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 MPLBACKEND=Agg  # Colab's kernel sets an inline backend that plain processes cannot load
 PO=$WORK/PaddleOCR; PX=$WORK/PaddleX; W=$WORK/pretrained; CFG=$OUT/configs; FONTS=$WORK/fonts
 HF=https://paddle-model-ecology.bj.bcebos.com/paddlex/official_pretrained_model
@@ -46,6 +52,22 @@ if has data; then
   python -m ocr_train --data "$DATA" check --dict "$DICT" || die check
   cat "$DATA/rec/meta.json"
 fi
+if has more; then
+  [ -s "$DATA/corpus.jsonl" ] || die "more: $DATA has no corpus.jsonl (restore data.tar first)"
+  # New seed + new shard name = new files next to the old ones. val ratio 0 keeps the validation lists, so accuracy stays comparable with round 1.
+  if [ "$MORE_LINES" -gt 0 ]; then
+    step "data: more synth-lines ($MORE_TAG)"
+    python -m ocr_train --data "$DATA" synth-lines --count "$MORE_LINES" --workers "$WORKERS" --fonts-dir "$FONTS" --seed "$MORE_SEED" --shard "synth_lines_$MORE_TAG" --val-ratio 0 || die more-lines
+  fi
+  if [ "$MORE_PAGES" -gt 0 ]; then
+    step "data: more synth-pages ($MORE_TAG)"
+    python -m ocr_train --data "$DATA" synth-pages --count "$MORE_PAGES" --workers "$WORKERS" --fonts-dir "$FONTS" --seed "$MORE_SEED" --shard "synth_pages_$MORE_TAG" --val-ratio 0 || die more-pages
+  fi
+  REPEAT=(); [ -n "$PDF_DIR" ] && REPEAT=(--repeat "pdf=$PDF_REPEAT")
+  python -m ocr_train --data "$DATA" merge "${REPEAT[@]}" || die merge
+  python -m ocr_train --data "$DATA" check --dict "$DICT" || die check
+  cat "$DATA/rec/meta.json"
+fi
 if has install; then
   step "install paddle (GPU build)"
   MAJOR=$(nvidia-smi | grep -oE 'CUDA Version: [0-9]+' | grep -oE '[0-9]+$'); TAG=$([ "${MAJOR:-12}" -ge 13 ] && echo cu130 || echo cu126)
@@ -54,12 +76,24 @@ if has install; then
   python -c "import paddle; paddle.utils.run_check()" 2>&1 | tail -2
 fi
 if has rec; then
-  step "rec: train"
-  [ -s "$W/rec.pdparams" ] || wget -q -O "$W/rec.pdparams" "$HF/PP-OCRv6_${SIZE}_rec_pretrained.pdparams" || die wget-rec
-  python -m ocr_train surgery --pretrained "$W/rec.pdparams" --old-dict "$UP" --new-dict "$DICT" --out "$W/rec_vi.pdparams" || die surgery
-  python -m ocr_train --data "$DATA" config-rec --paddleocr "$PO" --size "$SIZE" --dict "$DICT" --out "$CFG/rec.yml" --save-dir "$OUT/rec" --pretrained "$W/rec_vi.pdparams" --epochs "$REC_EPOCHS" --batch-size "$REC_BATCH" --workers "$WORKERS" --eval-every "$REC_EVAL" || die config-rec
-  RES=(); [ "$RESUME" = 1 ] && [ -f "$OUT/rec/latest.pdparams" ] && RES=(-o "Global.checkpoints=$OUT/rec/latest")
-  (cd "$PO" && python tools/train.py -c "$CFG/rec.yml" "${RES[@]}") > "$OUT/rec_train.log" 2>&1 || { tail -30 "$OUT/rec_train.log"; die rec-train; }
+  step "rec: train ($REC_TAG)"
+  [ -n "$INIT_FROM" ] && [ "$REC_TAG" = rec ] && die "INIT_FROM needs its own REC_TAG (e.g. rec_r2): training into rec/ would overwrite the run you continue from"
+  LIKE=()
+  if [ -n "$INIT_FROM" ]; then
+    case "$INIT_FROM" in /*) PRE=$INIT_FROM ;; *) PRE=$OUT/$INIT_FROM ;; esac
+    [ -f "$PRE.pdparams" ] || [ -f "$PRE" ] || die "INIT_FROM $PRE not found"
+    # warm start: weights only (fresh optimiser and learning-rate schedule), valid only for the dictionary it was trained with
+    python -m ocr_train check-init --pretrained "${PRE%.pdparams}.pdparams" --dict "$DICT" || die init-dict
+    PREV=$CFG/$(basename "$(dirname "$PRE")").yml; [ -f "$PREV" ] && LIKE=(--like "$PREV") || echo "note: $PREV not found, input width and max_text_length come from the merged data"
+  else
+    [ -s "$W/rec.pdparams" ] || wget -q -O "$W/rec.pdparams" "$HF/PP-OCRv6_${SIZE}_rec_pretrained.pdparams" || die wget-rec
+    python -m ocr_train surgery --pretrained "$W/rec.pdparams" --old-dict "$UP" --new-dict "$DICT" --out "$W/rec_vi.pdparams" || die surgery
+    PRE=$W/rec_vi.pdparams
+  fi
+  [ "$REC_TAG" != rec ] && [ -e "$OUT/$REC_TAG/latest.pdparams" ] && [ "$RESUME" != 1 ] && die "$OUT/$REC_TAG already holds a run: set RESUME=1 to continue it or pick another REC_TAG"
+  python -m ocr_train --data "$DATA" config-rec --paddleocr "$PO" --size "$SIZE" --dict "$DICT" --out "$CFG/$REC_TAG.yml" --save-dir "$OUT/$REC_TAG" --pretrained "$PRE" --epochs "$REC_EPOCHS" --batch-size "$REC_BATCH" --workers "$WORKERS" --eval-every "$REC_EVAL" --lr-scale "$REC_LR_SCALE" "${LIKE[@]}" || die config-rec
+  RES=(); [ "$RESUME" = 1 ] && [ -f "$OUT/$REC_TAG/latest.pdparams" ] && RES=(-o "Global.checkpoints=$OUT/$REC_TAG/latest")
+  (cd "$PO" && python tools/train.py -c "$CFG/$REC_TAG.yml" "${RES[@]}") > "$OUT/${REC_TAG}_train.log" 2>&1 || { tail -30 "$OUT/${REC_TAG}_train.log"; die rec-train; }
 fi
 if has det; then
   step "det: train"
@@ -85,6 +119,6 @@ if has export; then
     uv venv --seed --python 3.12 "$WORK/venv_cpu" || die venv-cpu
     uv pip install -q --python "$WORK/venv_cpu/bin/python" paddlepaddle==3.3.1 "paddleocr==3.7.0" "paddlex[ocr-core]==3.7.2" paddle2onnx==2.0.2rc3 onnxruntime "setuptools<81" -r "$PO/requirements.txt" -e "$CODE" || die pip-cpu
   fi
-  "$WORK/venv_cpu/bin/python" -m ocr_train export-all --paddleocr "$PO" --out "$OUT" || die export
+  "$WORK/venv_cpu/bin/python" -m ocr_train export-all --paddleocr "$PO" --out "$OUT" --rec-tag "$REC_TAG" ${EXPORT_ONLY:+--only $EXPORT_ONLY} || die export
 fi
 step "DONE ($PHASES)"

@@ -41,12 +41,12 @@ def cmd_charset(args):
 
 def cmd_synth_lines(args):
     print(synth_lines.build(_data(args) / "rec", _data(args) / "corpus.jsonl", args.fonts_dir, args.count, workers=args.workers, seed=args.seed,
-                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts))
+                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts, shard=args.shard or synth_lines.SHARD, val_ratio=args.val_ratio))
 
 
 def cmd_synth_pages(args):
     print(synth_pages.build(_data(args), _data(args) / "corpus.jsonl", args.fonts_dir, args.count, workers=args.workers, seed=args.seed,
-                            level=args.level, max_chars=args.max_chars, extra_fonts=args.extra_fonts))
+                            level=args.level, max_chars=args.max_chars, extra_fonts=args.extra_fonts, shard=args.shard or synth_pages.SHARD, val_ratio=args.val_ratio))
 
 
 def cmd_pdf_pages(args):
@@ -96,10 +96,19 @@ def cmd_config_rec(args):
     data = _data(args).resolve()
     meta = json.loads((data / "rec" / "meta.json").read_text())
     wh_list = data / "rec" / "train_list_wh.txt"
+    max_len, img_w = args.max_text_length or meta["max_text_length"], args.img_w or meta["img_w"]
+    if args.like:  # continue a run: same input width and label length as the config the checkpoint was trained with
+        import yaml
+        prev = yaml.safe_load(Path(args.like).read_text(encoding="utf-8"))
+        prev_len, prev_w = prev["Global"]["max_text_length"], prev["Train"]["sampler"]["scales"][1][0]
+        if meta["max_text_length"] > prev_len:  # PaddleOCR would drop these labels without a word
+            raise SystemExit(f"the merged data has labels up to {meta['max_text_length']} (incl. margin) but {args.like} was trained with max_text_length={prev_len}")
+        max_len, img_w = args.max_text_length or prev_len, args.img_w or prev_w
+        print(f"like {args.like}: max_text_length={max_len}, img_w={img_w} (data now suggests {meta['max_text_length']}, {meta['img_w']})")
     ds_width = not args.fixed_width and wh_list.exists()
     out = paddle_cfg.build_rec_config(
         _upstream(args, "rec"), args.out, data_root=str(data / "rec"), train_list=str(wh_list if ds_width else data / "rec" / "train_list.txt"), ds_width=ds_width, rec_aug=args.rec_aug, val_list=str(data / "rec" / "val_list.txt"),
-        dict_path=str(Path(args.dict).resolve()), max_text_length=args.max_text_length or meta["max_text_length"], img_w=args.img_w or meta["img_w"],
+        dict_path=str(Path(args.dict).resolve()), max_text_length=max_len, img_w=img_w,
         epochs=args.epochs, batch_size=args.batch_size, save_dir=str(Path(args.save_dir).resolve()), pretrained=args.pretrained, workers=args.workers,
         use_gpu=not args.cpu, eval_every=args.eval_every, eval_start=args.eval_every, lr_scale=args.lr_scale)
     print(out)
@@ -121,6 +130,10 @@ def cmd_surgery(args):
     print({k: v for k, v in stats.items() if k != "tensors"}, "->", args.out)
 
 
+def cmd_check_init(args):
+    print("ok,", head_surgery.check_init(head_surgery.load_pdparams(args.pretrained), charset.read_dict(args.dict)), "classes")
+
+
 def cmd_eval_rec(args):
     report = evaluate.evaluate_list(_data(args), args.list, args.model_name, args.model_dir, limit=args.limit)
     print(report.summary())
@@ -135,15 +148,17 @@ def cmd_export_all(args):
     def checkpoint(directory: Path) -> Path:  # best_accuracy exists once an evaluation ran; a very short run only has `latest`
         return directory / "best_accuracy" if (directory / "best_accuracy.pdparams").exists() else directory / "latest"
 
+    wanted = set(args.only or ("rec", "det", "layout"))
     for name, shape in (("rec", (2, 3, 48, 640)), ("det", (1, 3, 736, 544))):
-        if not (out / name).exists():
+        run = args.rec_tag if name == "rec" else name  # a continued recognition run lives in its own directory and exports next to the first
+        if name not in wanted or not (out / run).exists():
             continue
-        target = export.export_inference(args.paddleocr, cfg / f"{name}.yml", checkpoint(out / name), exp / name)
+        target = export.export_inference(args.paddleocr, cfg / f"{run}.yml", checkpoint(out / run), exp / run)
         if name == "rec":
             export.patch_rec_inference_yml(target)
         export.to_onnx(target, target / "model.onnx")
-        print(f"{name} onnx vs paddle, max |diff|:", export.verify_onnx(target, target / "model.onnx", shape))
-    if (out / "layout/best_model/inference").exists():
+        print(f"{run} onnx vs paddle, max |diff|:", export.verify_onnx(target, target / "model.onnx", shape))
+    if "layout" in wanted and (out / "layout/best_model/inference").exists():
         shutil.copytree(out / "layout/best_model/inference", exp / "layout", dirs_exist_ok=True)
         export.to_onnx(exp / "layout", exp / "layout/model.onnx")  # multi-input model: conversion is checked, not numerics
     print("exported:", sorted(str(p.relative_to(exp)) for p in exp.rglob("*") if p.is_file()))
@@ -169,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--count", type=int, required=True), s.add_argument("--fonts-dir", default="fonts"), s.add_argument("--extra-fonts", nargs="*", default=[])
         s.add_argument("--workers", type=int, default=2), s.add_argument("--seed", type=int, default=0), s.add_argument("--level", type=float, default=1.0)
         s.add_argument("--max-chars", type=int, default=100)
+        s.add_argument("--shard", help="write to a new shard with this name (and use a new --seed) to add data without touching an earlier run")
+        s.add_argument("--val-ratio", type=float, default=0.01 if name == "synth-lines" else 0.04, help="0 keeps the validation list unchanged, so accuracy stays comparable between rounds")
     s = add("pdf-pages", cmd_pdf_pages, "real born-digital PDFs -> labelled pages")
     s.add_argument("--pdfs", required=True), s.add_argument("--workers", type=int, default=2), s.add_argument("--seed", type=int, default=0)
     s.add_argument("--dpi", type=int, default=150), s.add_argument("--level", type=float, default=1.0), s.add_argument("--max-pages", type=int, default=40)
@@ -193,12 +210,17 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--eval-every", type=int, default=2000 if name == "config-rec" else 500)
         if name == "config-rec":
             s.add_argument("--dict", required=True), s.add_argument("--img-w", type=int), s.add_argument("--max-text-length", type=int)
+            s.add_argument("--like", help="an earlier rec config: reuse its input width and max_text_length (needed to continue its checkpoint)")
             s.add_argument("--rec-aug", action="store_true", help="keep PaddleOCR's RecAug (slower on few CPU cores; the data is already degraded)")
             s.add_argument("--fixed-width", action="store_true", help="pad every line to --img-w instead of grouping batches by width")
     s = add("surgery", cmd_surgery, "carry pretrained recogniser weights over to a new dictionary")
     s.add_argument("--pretrained", required=True), s.add_argument("--old-dict", required=True), s.add_argument("--new-dict", required=True), s.add_argument("--out", required=True)
     s = add("export-all", cmd_export_all, "export trained models to Paddle inference + ONNX")
     s.add_argument("--paddleocr", required=True), s.add_argument("--out", required=True, help="the training output directory")
+    s.add_argument("--rec-tag", default="rec", help="recognition run to export (its directory under --out); exported to export/<tag> unless it is `rec`")
+    s.add_argument("--only", nargs="*", choices=["rec", "det", "layout"], help="export just these models (default: everything that was trained)")
+    s = add("check-init", cmd_check_init, "fail unless a checkpoint was trained with this dictionary")
+    s.add_argument("--pretrained", required=True), s.add_argument("--dict", required=True)
     s = add("eval-rec", cmd_eval_rec, "CER / tone-error report of a recognition model on a list file")
     s.add_argument("--list", default="val_list.txt"), s.add_argument("--model-name", required=True), s.add_argument("--model-dir"), s.add_argument("--limit", type=int, default=2000)
     return p

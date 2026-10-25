@@ -84,3 +84,35 @@ def test_rec_config_width_aware(tmp_path):
     assert not any("RecAug" in x for x in cfg["Train"]["dataset"]["transforms"])
     assert cfg["Train"]["dataset"]["ds_width"] is True and cfg["Train"]["sampler"]["max_w"] == 1600
     assert cfg["Train"]["dataset"]["label_file_list"] == ["/d/t_wh.txt"]
+
+
+def test_check_init_rejects_another_dictionary():
+    dictionary = ["a", "ê", "ế", "c"]
+    n = len(dictionary) + 2
+    params = {"head.ctc_head.fc.weight": np.zeros((8, n), "float32"), "head.ctc_head.fc.bias": np.zeros((n,), "float32")}
+    assert head_surgery.check_init(params, dictionary) == n
+    with pytest.raises(ValueError):
+        head_surgery.check_init(params, dictionary + ["ạ"])
+
+
+def _config_rec(tmp_path, monkeypatch, meta_len, like_len, extra=()):
+    from ocr_train import cli
+    data = tmp_path / "data"
+    (data / "rec").mkdir(parents=True)
+    (data / "rec" / "meta.json").write_text(f'{{"max_text_length": {meta_len}, "img_w": 1600}}')
+    (tmp_path / "prev.yml").write_text(yaml.safe_dump({"Global": {"max_text_length": like_len}, "Train": {"sampler": {"scales": [[1280, 32], [1280, 48], [1280, 64]]}}}))
+    seen = {}
+    monkeypatch.setattr(paddle_cfg, "build_rec_config", lambda *a, **kw: seen.update(kw) or tmp_path / "o.yml")
+    cli.main(["--data", str(data), "config-rec", "--paddleocr", str(tmp_path), "--dict", str(tmp_path / "d.txt"), "--out", str(tmp_path / "o.yml"),
+              "--save-dir", str(tmp_path / "s"), "--like", str(tmp_path / "prev.yml"), *extra])
+    return seen
+
+
+def test_config_rec_like_keeps_the_checkpoints_shapes(tmp_path, monkeypatch):
+    seen = _config_rec(tmp_path, monkeypatch, meta_len=104, like_len=104)
+    assert seen["max_text_length"] == 104 and seen["img_w"] == 1280  # width from the earlier config, not the data's 1600
+
+
+def test_config_rec_like_refuses_labels_that_would_be_dropped(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit, match="max_text_length=104"):
+        _config_rec(tmp_path, monkeypatch, meta_len=130, like_len=104)

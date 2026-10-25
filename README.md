@@ -51,6 +51,25 @@ Văn bản quy phạm pháp luật không thuộc đối tượng bảo hộ quy
 Đường PDF thật **từ chối và đếm**: trang scan (có ảnh phủ cả trang, thường kèm lớp OCR của ai đó) và trang có text layer giải mã ra rác do font
 cũ VNI/TCVN3 (`charset.looks_vietnamese`). Những trang đó cần gán nhãn thủ công hoặc mô hình thầy, không được coi là nhãn chuẩn.
 
+### Vòng 2: train tiếp từ checkpoint tốt nhất, thêm dữ liệu, GPU lớn hơn
+
+Không ghi đè vòng 1: dữ liệu mới vào shard mới, run mới vào thư mục riêng.
+
+```
+# trên VM mới, sau khi khôi phục data.tar từ Drive
+PHASES="setup install more rec" REC_TAG=rec_r2 INIT_FROM=rec/best_accuracy \
+  MORE_SEED=1 MORE_LINES=400000 MORE_PAGES=2000 REC_BATCH=128 REC_EVAL=500 REC_LR_SCALE=0.6 bash scripts/run_pipeline.sh
+EXPORT_ONLY=rec REC_TAG=rec_r2 PHASES=export bash scripts/run_pipeline.sh     # -> export/rec_r2
+```
+
+* `more` sinh `synth_lines_<MORE_TAG>` / `synth_pages_<MORE_TAG>` bằng `--seed` mới (cùng seed sẽ sinh lại đúng các dòng cũ) và `--val-ratio 0`, nên
+  `val_list.txt` giữ nguyên và độ chính xác hai vòng so sánh trực tiếp được. Shard trang mới không ghi lại COCO của layout.
+* `INIT_FROM` nạp **chỉ trọng số** (optimizer và lịch learning rate bắt đầu lại), khác `RESUME` (khôi phục `latest` cả optimizer và epoch, dùng khi run bị ngắt giữa chừng).
+  `check-init` từ chối checkpoint train với từ điển khác, vì PaddleOCR bỏ qua âm thầm tensor lệch shape. `--like` lấy lại bề rộng đầu vào và `max_text_length` của
+  config vòng 1 và dừng nếu dữ liệu mới có nhãn dài hơn (PaddleOCR sẽ lặng lẽ bỏ các nhãn đó).
+* Script từ chối chạy khi `INIT_FROM` đi với `REC_TAG=rec`, hoặc khi thư mục `REC_TAG` đã có run mà không đặt `RESUME=1`.
+* Batch lớn: bộ nhớ tăng theo batch (T4, batch 32: 6,6 GB allocated, 10,8 GB reserved). `REC_LR_SCALE` chưa được kiểm chứng cho batch lớn; nếu lần eval đầu thấp hơn nhiều so với best của vòng 1 thì giảm xuống.
+
 ### Khác biệt so với công thức upstream, và lý do
 
 | Thiết lập | Upstream | Ở đây | Lý do |

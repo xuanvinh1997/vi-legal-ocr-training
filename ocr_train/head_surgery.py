@@ -46,6 +46,16 @@ def class_list(dictionary: list[str], use_space_char: bool = True) -> list[str]:
     return ["blank"] + list(dictionary) + ([" "] if use_space_char else [])
 
 
+def check_init(params: dict, dictionary: list[str], use_space_char: bool = True) -> int:
+    """A checkpoint is only a valid start for a dictionary if its CTC output layer has that many classes. PaddleOCR skips tensors of a
+    different shape without failing, so a mismatch would silently train a random classifier on top of the old backbone."""
+    expected = len(class_list(dictionary, use_space_char))
+    sizes = sorted({int(v.shape[-1]) for k, v in params.items() if "ctc_head" in k and k.endswith("bias") and getattr(v, "ndim", 0) == 1})
+    if expected not in sizes:
+        raise ValueError(f"the checkpoint's CTC layer has {sizes} classes but the dictionary needs {expected}: it was trained with another dictionary")
+    return expected
+
+
 def remap_ctc_head(params: dict, old_dict: list[str], new_dict: list[str], *, use_space_char: bool = True, seed: int = 0) -> tuple[OrderedDict, dict]:
     old_classes, new_classes = class_list(old_dict, use_space_char), class_list(new_dict, use_space_char)
     old_index: dict[str, int] = {}

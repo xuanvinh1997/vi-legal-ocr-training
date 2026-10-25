@@ -31,6 +31,7 @@ PX_PER_PT = DPI / 72
 PX_PER_MM = DPI / 25.4
 
 # Legal-document layout classes. Ids start at 1: PaddleX/COCO reserve 0 for `_background_`.
+SHARD = "synth_pages"
 CATEGORIES = ["national_header", "issuer", "doc_number_date", "doc_title", "para_title", "text", "table",
               "signature", "recipients", "seal", "page_number"]
 CAT_ID = {name: i + 1 for i, name in enumerate(CATEGORIES)}
@@ -445,6 +446,7 @@ class PageJob:
     level: float
     rec_per_page: int
     max_chars: int
+    shard: str
 
 
 def _doc_pages(rng: random.Random, doc: dict, families: list[Family]):
@@ -462,8 +464,8 @@ def _work(job: PageJob) -> dict:
     docs = [d for d in corpus.load_corpus(job.corpus_path) if len(d["blocks"]) >= 8]
     allowed = set(charset.build_charset())
     root = Path(job.root)
-    (root / "det/synth_pages/images").mkdir(parents=True, exist_ok=True)
-    (root / "rec/synth_pages/images").mkdir(parents=True, exist_ok=True)
+    (root / "det" / job.shard / "images").mkdir(parents=True, exist_ok=True)
+    (root / "rec" / job.shard / "images").mkdir(parents=True, exist_ok=True)
     out = {"det": {"train": [], "val": []}, "rec": {"train": [], "val": []}, "coco": {"train": [], "val": []}}
     made = 0
     while made < job.count:
@@ -476,7 +478,7 @@ def _work(job: PageJob) -> dict:
                 continue
             page_id = f"p{job.index:03d}_{made:06d}"
             img, lines, regions, ignores = finalize(canvas, rng, job.level)
-            rel = f"synth_pages/images/{page_id}.jpg"
+            rel = f"{job.shard}/images/{page_id}.jpg"
             img.save(root / "det" / rel, quality=rng.randint(80, 95))
             det = [{"transcription": t, "points": [[round(x, 1), round(y, 1)] for x, y in q]} for t, q in lines]
             det += [{"transcription": "###", "points": [[round(x, 1), round(y, 1)] for x, y in q]} for q in ignores]
@@ -490,7 +492,7 @@ def _work(job: PageJob) -> dict:
                 crop = geo.crop_quad(img, geo.clip_quad(geo.jitter_quad(quad, rng, 4), *img.size))
                 if crop is None:
                     continue
-                crel = f"synth_pages/images/{page_id}_{k:02d}.jpg"
+                crel = f"{job.shard}/images/{page_id}_{k:02d}.jpg"
                 crop.save(root / "rec" / crel, quality=92)
                 out["rec"][split].append(f"{crel}\t{text}")
             made += 1
@@ -499,21 +501,25 @@ def _work(job: PageJob) -> dict:
 
 def build(root: str | Path, corpus_path: str | Path, fonts_dir: str | Path, count: int, *, workers: int = 2, seed: int = 0,
           val_ratio: float = 0.04, level: float = 1.0, rec_per_page: int = 20, max_chars: int = 100,
-          extra_fonts: list[str] = ()) -> dict[str, int]:
-    """Writes `<root>/det/synth_pages`, `<root>/rec/synth_pages` and `<root>/layout` (PaddleX COCO)."""
+          extra_fonts: list[str] = (), shard: str = SHARD) -> dict[str, int]:
+    """Writes `<root>/det/<shard>`, `<root>/rec/<shard>` and `<root>/layout` (PaddleX COCO).
+
+    An extra shard (new `shard` name and `seed`) is added next to the first run. The layout set is only written for the default shard: its
+    COCO files are rebuilt from this call alone, so writing them again would replace the earlier pages."""
     ensure_fonts(fonts_dir, list(extra_fonts))
     root = Path(root)
     shards = max(1, workers * 3)
     per = -(-count // shards)
-    jobs = [PageJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, val_ratio, level, rec_per_page, max_chars) for i in range(shards)]
+    jobs = [PageJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, val_ratio, level, rec_per_page, max_chars, shard) for i in range(shards)]
     results = run_parallel(_work, jobs, workers)
     stats: dict[str, int] = {}
     for kind in ("det", "rec"):
         for split in ("train", "val"):
             lines = [l for r in results for l in r[kind][split]]
-            write_lines(root / kind / "synth_pages" / f"{split}.txt", lines)
+            write_lines(root / kind / shard / f"{split}.txt", lines)
             stats[f"{kind}_{split}"] = len(lines)
-    _write_coco(root / "layout", root / "det/synth_pages/images", [r["coco"] for r in results], stats)
+    if shard == SHARD:
+        _write_coco(root / "layout", root / "det" / shard / "images", [r["coco"] for r in results], stats)
     return stats
 
 
