@@ -5,3 +5,11 @@ output/
 **/__pycache__/
 *.egg-info/
 .DS_Store
+unlimited_ocr/.venv/
+unlimited_ocr/results/
+unlimited_ocr/official/
+unlimited_ocr/mps_model/
+unlimited_ocr/*.log
+unlimited_ocr/.venv_conv/
+unlimited_ocr/doc_ori/
+unlimited_ocr/doc_ori.onnx
