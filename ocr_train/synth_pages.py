@@ -447,6 +447,7 @@ class PageJob:
     rec_per_page: int
     max_chars: int
     shard: str
+    en_ratio: float = 0.2
 
 
 def _doc_pages(rng: random.Random, doc: dict, families: list[Family]):
@@ -469,7 +470,7 @@ def _work(job: PageJob) -> dict:
     out = {"det": {"train": [], "val": []}, "rec": {"train": [], "val": []}, "coco": {"train": [], "val": []}}
     made = 0
     while made < job.count:
-        doc = rng.choice(docs)
+        doc = corpus.pick_document(docs, rng, job.en_ratio)
         split = "val" if is_val(doc["id"], job.val_ratio) else "train"
         for p, canvas in _doc_pages(rng, doc, families):
             if made >= job.count:
@@ -501,16 +502,17 @@ def _work(job: PageJob) -> dict:
 
 def build(root: str | Path, corpus_path: str | Path, fonts_dir: str | Path, count: int, *, workers: int = 2, seed: int = 0,
           val_ratio: float = 0.04, level: float = 1.0, rec_per_page: int = 20, max_chars: int = 100,
-          extra_fonts: list[str] = (), shard: str = SHARD) -> dict[str, int]:
+          extra_fonts: list[str] = (), shard: str = SHARD, en_ratio: float = 0.2) -> dict[str, int]:
     """Writes `<root>/det/<shard>`, `<root>/rec/<shard>` and `<root>/layout` (PaddleX COCO).
 
     An extra shard (new `shard` name and `seed`) is added next to the first run. The layout set is only written for the default shard: its
-    COCO files are rebuilt from this call alone, so writing them again would replace the earlier pages."""
+    COCO files are rebuilt from this call alone, so writing them again would replace the earlier pages.
+    `en_ratio`: share of pages whose body comes from an English document of the corpus (the letterhead stays Vietnamese)."""
     ensure_fonts(fonts_dir, list(extra_fonts))
     root = Path(root)
     shards = max(1, workers * 3)
     per = -(-count // shards)
-    jobs = [PageJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, val_ratio, level, rec_per_page, max_chars, shard) for i in range(shards)]
+    jobs = [PageJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, val_ratio, level, rec_per_page, max_chars, shard, en_ratio) for i in range(shards)]
     results = run_parallel(_work, jobs, workers)
     stats: dict[str, int] = {}
     for kind in ("det", "rec"):

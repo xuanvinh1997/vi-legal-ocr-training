@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import charset, corpus, legal_text
+from . import charset, corpus, english, legal_text
 from .common import is_val, rng_for, run_parallel, write_lines
 from .degrade import degrade, degrade_scan
 from .fonts import Family, ensure_fonts, pick
@@ -35,14 +35,16 @@ class LineJob:
     level: float
     shard: str
     profile: str = "standard"
+    en_ratio: float = 0.25
 
 
-def sample_text(snippets, rng: random.Random, max_chars: int) -> str:
+def sample_text(snippets, rng: random.Random, max_chars: int, en_ratio: float = 0.0) -> str:
+    fragment = english.random_fragment if rng.random() < en_ratio else legal_text.random_fragment
     roll = rng.random()
     if roll < 0.15:
-        text = legal_text.random_fragment(rng)
+        text = fragment(rng)
     elif roll < 0.22:  # label + value style fields
-        text = f"{legal_text.random_fragment(rng)}; {next(snippets)}"
+        text = f"{fragment(rng)}; {next(snippets)}"
     else:
         text = next(snippets)
     if rng.random() < 0.10:
@@ -54,14 +56,14 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
     rng = rng_for(job.seed, "lines", job.index)
     families = ensure_fonts(job.fonts_dir, job.extra_fonts)
     docs = corpus.load_corpus(job.corpus_path)
-    snippets = corpus.sentences(docs, rng, 3, job.max_chars)
+    snippets = corpus.sentences(docs, rng, 3, job.max_chars, job.en_ratio)
     allowed = set(charset.build_charset())
     out_dir = Path(job.root) / job.shard / "images"
     out_dir.mkdir(parents=True, exist_ok=True)
     train, val = [], []
     for k in range(job.count):
         n = job.index * job.count + k
-        text = charset.restrict(sample_text(snippets, rng, job.max_chars), allowed, 1.0)
+        text = charset.restrict(sample_text(snippets, rng, job.max_chars, job.en_ratio), allowed, 1.0)
         if not text:
             continue
         family: Family = pick(families, rng)
@@ -85,12 +87,12 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
 
 def build(root: str | Path, corpus_path: str | Path, fonts_dir: str | Path, count: int, *, workers: int = 2,
           seed: int = 0, max_chars: int = 100, val_ratio: float = 0.01, level: float = 1.0,
-          extra_fonts: list[str] = (), shard: str = SHARD, profile: str = "standard") -> dict[str, int]:
-    """`profile="scan"` renders lines at scan resolution with a detector crop's margin and artefacts (see degrade.degrade_scan). `shard` + a new `seed` add data next to an earlier run instead of overwriting it; `val_ratio=0` keeps the validation set unchanged."""
+          extra_fonts: list[str] = (), shard: str = SHARD, profile: str = "standard", en_ratio: float = 0.25) -> dict[str, int]:
+    """`profile="scan"` renders lines at scan resolution with a detector crop's margin and artefacts (see degrade.degrade_scan). `shard` + a new `seed` add data next to an earlier run instead of overwriting it; `val_ratio=0` keeps the validation set unchanged. `en_ratio`: share of lines drawn from English text (needs English documents in the corpus for prose; fragments are always available)."""
     ensure_fonts(fonts_dir, list(extra_fonts))  # download once, before the workers race for it
     shards = max(1, workers * 4)
     per = -(-count // shards)
-    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level, shard, profile) for i in range(shards)]
+    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level, shard, profile, en_ratio) for i in range(shards)]
     results = run_parallel(_work, jobs, workers)
     train = [l for t, _ in results for l in t]
     val = [l for _, v in results for l in v]

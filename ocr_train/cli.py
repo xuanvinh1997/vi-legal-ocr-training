@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import charset, corpus, dataset, evaluate, export, head_surgery, paddle_cfg, pdf_labels, public_sets, synth_lines, synth_pages
+from . import charset, corpus, dataset, english, evaluate, export, head_surgery, paddle_cfg, pdf_labels, public_sets, synth_lines, synth_pages
 
 
 def _data(args) -> Path:
@@ -22,7 +22,10 @@ def cmd_sources(args):
 def cmd_corpus(args):
     out = _data(args) / "corpus.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
-    print(corpus.build_corpus(out, corpus.stream_documents(args.docs, seed=args.seed)), "->", out)
+    docs = list(english.template_documents(args.en_docs, seed=args.seed))
+    if args.en_dataset:
+        docs += english.stream_documents(args.en_dataset, args.en_dataset_docs, config=args.en_config, column=args.en_column, seed=args.seed)
+    print(corpus.build_corpus(out, corpus.stream_documents(args.docs, seed=args.seed), english=docs), "->", out)
 
 
 def cmd_charset(args):
@@ -41,12 +44,13 @@ def cmd_charset(args):
 
 def cmd_synth_lines(args):
     print(synth_lines.build(_data(args) / "rec", _data(args) / "corpus.jsonl", args.fonts_dir, args.count, workers=args.workers, seed=args.seed,
-                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts, shard=args.shard or synth_lines.SHARD, val_ratio=args.val_ratio, profile=args.profile))
+                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts, shard=args.shard or synth_lines.SHARD, val_ratio=args.val_ratio, profile=args.profile,
+                            en_ratio=args.en_ratio))
 
 
 def cmd_synth_pages(args):
     print(synth_pages.build(_data(args), _data(args) / "corpus.jsonl", args.fonts_dir, args.count, workers=args.workers, seed=args.seed,
-                            level=args.level, max_chars=args.max_chars, extra_fonts=args.extra_fonts, shard=args.shard or synth_pages.SHARD, val_ratio=args.val_ratio))
+                            level=args.level, max_chars=args.max_chars, extra_fonts=args.extra_fonts, shard=args.shard or synth_pages.SHARD, val_ratio=args.val_ratio, en_ratio=args.en_ratio))
 
 
 def cmd_pdf_pages(args):
@@ -177,6 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
     add("sources", cmd_sources, "list public data sources and licences")
     s = add("corpus", cmd_corpus, "stream legal documents from the Hub into corpus.jsonl", hard_exit=True)
     s.add_argument("--docs", type=int, default=3000), s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--en-docs", type=int, default=600, help="English contracts built from templates (no download); 0 for a Vietnamese-only corpus")
+    s.add_argument("--en-dataset", help="optional Hub dataset with English plain text to add (check its licence)"), s.add_argument("--en-config"), s.add_argument("--en-column", default="text")
+    s.add_argument("--en-dataset-docs", type=int, default=1000)
     s = add("charset", cmd_charset, "write the Vietnamese dictionary (compact, or extend an upstream one)")
     s.add_argument("--mode", choices=["compact", "extend"], default="compact"), s.add_argument("--upstream-dict")
     for name, fn, help_ in [("synth-lines", cmd_synth_lines, "synthetic recognition lines"), ("synth-pages", cmd_synth_pages, "synthetic pages (det + layout + rec crops)")]:
@@ -184,6 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--count", type=int, required=True), s.add_argument("--fonts-dir", default="fonts"), s.add_argument("--extra-fonts", nargs="*", default=[])
         s.add_argument("--workers", type=int, default=2), s.add_argument("--seed", type=int, default=0), s.add_argument("--level", type=float, default=1.0)
         s.add_argument("--max-chars", type=int, default=100)
+        s.add_argument("--en-ratio", type=float, default=0.25 if name == "synth-lines" else 0.2, help="share of English lines/pages; 0 gives Vietnamese only")
         s.add_argument("--shard", help="write to a new shard with this name (and use a new --seed) to add data without touching an earlier run")
         if name == "synth-lines":
             s.add_argument("--profile", choices=["standard", "scan"], default="standard", help="`scan`: lines at scan resolution (~30 px high) with a detector crop's margin, neighbouring-line slivers, more italics, JPEG at that resolution")

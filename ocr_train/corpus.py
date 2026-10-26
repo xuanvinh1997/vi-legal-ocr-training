@@ -157,9 +157,10 @@ def stream_documents(limit: int, seed: int = 0, dataset: str = DATASET, config: 
         yield str(row["id"]), row["content_html"]
 
 
-def build_corpus(out_path: str | Path, documents: Iterable[tuple[str, str]], max_blocks: int = 400) -> dict[str, int]:
+def build_corpus(out_path: str | Path, documents: Iterable[tuple[str, str]], max_blocks: int = 400, english: Iterable[dict] = ()) -> dict[str, int]:
+    """`english`: ready-made corpus documents (see `english.py`), appended as they are; they carry `"lang": "en"`."""
     allowed = set(charset.build_charset())
-    stats = {"documents": 0, "blocks": 0}
+    stats = {"documents": 0, "blocks": 0, "en_documents": 0}
     with Path(out_path).open("w", encoding="utf-8") as handle:
         for doc_id, html in documents:
             blocks = clean_blocks(html_to_blocks(html), allowed)[:max_blocks]
@@ -168,6 +169,10 @@ def build_corpus(out_path: str | Path, documents: Iterable[tuple[str, str]], max
             handle.write(json.dumps({"id": doc_id, "blocks": [asdict(b) for b in blocks]}, ensure_ascii=False) + "\n")
             stats["documents"] += 1
             stats["blocks"] += len(blocks)
+        for doc in english:
+            handle.write(json.dumps(doc, ensure_ascii=False) + "\n")
+            stats["en_documents"] += 1
+            stats["blocks"] += len(doc["blocks"])
     return stats
 
 
@@ -176,13 +181,28 @@ def load_corpus(path: str | Path) -> list[dict]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
-def sentences(corpus: list[dict], rng: random.Random, min_chars: int = 3, max_chars: int = 120) -> Iterator[str]:
-    """Endless stream of text snippets cut at word boundaries, favouring short and medium lengths like real lines."""
-    paragraphs = [b["text"] for doc in corpus for b in doc["blocks"] if b["kind"] in ("text", "heading", "title")]
-    if not paragraphs:
+def is_english(doc: dict) -> bool:
+    return doc.get("lang") == "en"
+
+
+def pick_document(docs: list[dict], rng: random.Random, en_ratio: float = 0.0) -> dict:
+    """A random document; English ones are drawn with probability `en_ratio` (when the corpus has any), whatever their count."""
+    en = [d for d in docs if is_english(d)]
+    vi = [d for d in docs if not is_english(d)]
+    return rng.choice(en if en and (not vi or rng.random() < en_ratio) else vi)
+
+
+def sentences(corpus: list[dict], rng: random.Random, min_chars: int = 3, max_chars: int = 120, en_ratio: float = 0.0) -> Iterator[str]:
+    """Endless stream of text snippets cut at word boundaries, favouring short and medium lengths like real lines.
+    A fraction `en_ratio` of them comes from English documents (if the corpus has any)."""
+    kinds = ("text", "heading", "title")
+    paragraphs = [b["text"] for doc in corpus if not is_english(doc) for b in doc["blocks"] if b["kind"] in kinds]
+    english = [b["text"] for doc in corpus if is_english(doc) for b in doc["blocks"] if b["kind"] in kinds]
+    if not paragraphs and not english:
         raise ValueError("empty corpus")
     while True:
-        words = rng.choice(paragraphs).split(" ")
+        pool = english if english and (not paragraphs or rng.random() < en_ratio) else paragraphs
+        words = rng.choice(pool).split(" ")
         if len(words) < 2:
             continue
         start = rng.randrange(len(words)) if rng.random() < 0.7 else 0

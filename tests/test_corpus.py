@@ -46,3 +46,31 @@ def test_table_cells_with_inner_paragraphs():
     rows = [b.cells for b in blocks if b.kind == "table_row"]
     assert rows[0] == ["STT", "Tên đơn vị"] and rows[1] == ["1", "Sở Tài chính"]
     assert len(rows) == 3 and blocks[-1].text == "Sau bảng"
+
+
+def test_english_corpus_and_ratio(tmp_path):
+    from ocr_train import english
+
+    en = list(english.template_documents(5, seed=1))
+    assert all(d["lang"] == "en" and len(d["blocks"]) >= 8 for d in en)
+    assert all(english.looks_english(b["text"]) for d in en for b in d["blocks"] if b["kind"] == "text" and len(b["text"].split()) >= 3)
+    allowed = set(charset.build_charset())
+    assert all(charset.restrict(b["text"], allowed, 1.0) for d in en for b in d["blocks"])
+    out = tmp_path / "corpus.jsonl"
+    stats = corpus.build_corpus(out, [("1", HTML)], english=en)
+    assert stats["en_documents"] == 5
+    docs = corpus.load_corpus(out)
+    gen = corpus.sentences(docs, random.Random(0), 3, 60, en_ratio=0.5)
+    lines = [next(gen) for _ in range(400)]
+    share = sum(l.isascii() for l in lines) / len(lines)
+    assert 0.35 < share < 0.75
+    assert not any(corpus.is_english(corpus.pick_document(docs, random.Random(i), 0.0)) for i in range(50))
+    assert corpus.is_english(corpus.pick_document(docs, random.Random(0), 1.0))
+
+
+def test_looks_english_rejects_vietnamese_and_noise():
+    from ocr_train import english
+
+    assert english.looks_english("The Seller shall deliver the Goods within thirty days")
+    assert not english.looks_english("Căn cứ Luật Tổ chức chính quyền địa phương")
+    assert not english.looks_english("xkq zzv wpl qqq rtt")

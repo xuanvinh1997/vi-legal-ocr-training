@@ -129,3 +129,8 @@ pip install -e .[dev]
 pytest tests                                                          # test nhanh
 OCR_TEST_FONTS=/tmp/fonts OCR_TEST_CORPUS=corpus.jsonl pytest tests   # thêm test bộ sinh dữ liệu
 ```
+
+## Dữ liệu tiếng Anh
+
+Corpus gốc chỉ có tiếng Việt (và `looks_vietnamese` loại mọi đoạn khác), nên model yếu với tên riêng, địa chỉ, email, hợp đồng song ngữ. `corpus` giờ thêm `--en-docs` (mặc định 600) hợp đồng tiếng Anh dựng từ mẫu câu trong `ocr_train/english.py`, không cần tải; thêm văn bản thật bằng `--en-dataset <hub id> --en-column text` (kiểm tra giấy phép trước). `synth-lines --en-ratio 0.25` và `synth-pages --en-ratio 0.2` quyết định tỉ lệ; `0` quay về chỉ tiếng Việt. Cần chạy lại `corpus` rồi sinh shard mới (`--shard synth_lines_en --seed 7 --val-ratio 0` để không đụng dữ liệu cũ).
+
