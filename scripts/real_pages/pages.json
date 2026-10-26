@@ -1,0 +1,5 @@
+{
+  "qd_p1": {"pdf": "20260318_1193.QD-UBND_Bai toan lon_2026-2030.pdf", "page": 1, "truth": "qd_p1.txt"},
+  "qd_p2": {"pdf": "20260318_1193.QD-UBND_Bai toan lon_2026-2030.pdf", "page": 2, "truth": "qd_p2.txt"},
+  "nq_p2": {"pdf": "20260615_57.2026.NQ-HĐND_Phat trien nhan luc chat luong cao.pdf", "page": 2, "truth": "nq_p2.txt"}
+}

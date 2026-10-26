@@ -41,7 +41,7 @@ def cmd_charset(args):
 
 def cmd_synth_lines(args):
     print(synth_lines.build(_data(args) / "rec", _data(args) / "corpus.jsonl", args.fonts_dir, args.count, workers=args.workers, seed=args.seed,
-                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts, shard=args.shard or synth_lines.SHARD, val_ratio=args.val_ratio))
+                            max_chars=args.max_chars, level=args.level, extra_fonts=args.extra_fonts, shard=args.shard or synth_lines.SHARD, val_ratio=args.val_ratio, profile=args.profile))
 
 
 def cmd_synth_pages(args):
@@ -185,6 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--workers", type=int, default=2), s.add_argument("--seed", type=int, default=0), s.add_argument("--level", type=float, default=1.0)
         s.add_argument("--max-chars", type=int, default=100)
         s.add_argument("--shard", help="write to a new shard with this name (and use a new --seed) to add data without touching an earlier run")
+        if name == "synth-lines":
+            s.add_argument("--profile", choices=["standard", "scan"], default="standard", help="`scan`: lines at scan resolution (~30 px high) with a detector crop's margin, neighbouring-line slivers, more italics, JPEG at that resolution")
         s.add_argument("--val-ratio", type=float, default=0.01 if name == "synth-lines" else 0.04, help="0 keeps the validation list unchanged, so accuracy stays comparable between rounds")
     s = add("pdf-pages", cmd_pdf_pages, "real born-digital PDFs -> labelled pages")
     s.add_argument("--pdfs", required=True), s.add_argument("--workers", type=int, default=2), s.add_argument("--seed", type=int, default=0)

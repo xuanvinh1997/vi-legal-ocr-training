@@ -109,6 +109,19 @@ không dạy vẻ ngoài scan thật của bạn: sẽ có khoảng cách cho t�
 Mô hình nhỏ là điều kiện để làm việc này: mỗi mô hình một phiên ONNX Runtime (hoặc một tiến trình) cùng thread pool, giữ `intra_op_num_threads` ở 1–2 cho mỗi phiên để các phiên
 không tranh nhau lõi CPU, và gom crop recognition theo độ rộng.
 
+## Đo trên bản quét thật và chạy thử PDF
+
+Điểm đánh giá của PaddleOCR trộn dòng tổng hợp với dòng thật nên không theo kịp chất lượng trên bản quét (vòng r3: điểm đó đứng yên hoặc giảm trong khi CER trên trang thật giảm từ 3,0% xuống dưới 1%). Hai script chạy pipeline của `services/ocr` (monorepo private-ai; đặt `OCR_SERVICE_DIR` nếu repo này nằm chỗ khác) trên model ONNX đã export (`det/`, `rec/`, và `layout/`, `doc_ori/` nếu muốn Markdown và tự xoay trang):
+
+```bash
+# CER và số chữ có dấu mũ + dấu thanh đọc sai, trên 3 trang quét có đáp án gõ tay (scripts/real_pages/, PDF ở tests/)
+python scripts/eval_real.py --models <thư mục model> [--unclip 2.0] [--json kq.json]
+# cả file PDF qua pipeline: document.md, từng trang pNN.md, ảnh layout pNN_layout.png, summary.json
+python scripts/run_pdf.py "tests/<file>.pdf" --models <thư mục model> --out <thư mục kết quả> [--unclip 2.0] [--pages 1-5]
+```
+
+Cần onnxruntime, opencv, pyclipper (như `services/ocr`), PyMuPDF và RapidFuzz. Model cũ (trước r3) cho CER 3,0% và đọc sai 47% chữ dấu mũ + dấu thanh; `--unclip 2.0` nới khung chữ để giữ dấu nặng dưới chữ. Chỉ có 3 trang, nên đây là phép đo để so các lần train với nhau, không phải độ chính xác tổng quát.
+
 ## Test
 
 ```bash

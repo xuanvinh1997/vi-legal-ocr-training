@@ -57,3 +57,56 @@ def degrade(img: Image.Image, rng: random.Random, level: float = 1.0) -> Image.I
         img.save(buf, "JPEG", quality=rng.randint(30, 92))
         img = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
     return img
+
+
+def degrade_scan(img: Image.Image, rng: random.Random, level: float = 1.0) -> Image.Image:
+    """A line as a detector crop of a ~150 dpi scan. The caller has rendered it large and shrunk it to scan resolution, so the
+    strokes are anti-aliased like a scanner's; this adds what such a crop has on top: the margin a detector box leaves, slivers of
+    the neighbouring lines' descenders and ascenders at its top and bottom edges, a slight skew, a colour cast, blur, noise and
+    JPEG compression at that resolution. The image keeps that small size (30 px high or so): recognition resizes it to 48 itself,
+    as it does at inference, so a model trained on these sees the upsampled, soft tone marks it meets on real scans."""
+    img = img.convert("RGB")
+    arr0 = np.asarray(img)
+    paper = np.median(arr0.reshape(-1, 3), axis=0)
+    luma = arr0.mean(axis=2)
+    ink = arr0[luma <= np.percentile(luma, 3)].mean(axis=0) if luma.size else np.zeros(3)
+
+    pad_t, pad_b = rng.randint(1, 5), rng.randint(1, 5)
+    h, w = arr0.shape[:2]
+    canvas = np.empty((h + pad_t + pad_b, w, 3), dtype=np.float32)
+    canvas[:] = paper
+    canvas[pad_t:pad_t + h] = arr0
+    gen = np.random.default_rng(rng.getrandbits(32))
+    for edge, pad in (("top", pad_t), ("bottom", pad_b)):
+        if rng.random() < 0.3 * min(level, 1.5):  # a few grey flecks, not a fringe
+            cols = np.flatnonzero(gen.random(w) < rng.uniform(0.01, 0.05))
+            for x in cols:
+                length = rng.randint(1, min(pad + 1, 3))
+                width = rng.randint(1, 2)
+                rows = slice(0, length) if edge == "top" else slice(canvas.shape[0] - length, canvas.shape[0])
+                canvas[rows, x:x + width] = ink + (paper - ink) * rng.uniform(0.3, 0.75)
+    img = Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8), "RGB")
+
+    if rng.random() < 0.3:  # a page is never perfectly straight in the scanner
+        img = img.rotate(rng.uniform(-1.2, 1.2), resample=Image.BICUBIC, expand=True, fillcolor=tuple(int(v) for v in paper))
+    if rng.random() < 0.7:
+        img = img.filter(ImageFilter.GaussianBlur(rng.uniform(0.3, 0.9)))
+
+    arr = np.asarray(img, dtype=np.float32)
+    if rng.random() < 0.3 * level:  # the colour cast along one side of a scan (a blue-violet shade at the margin)
+        ramp = np.clip((np.linspace(0, 1, arr.shape[1]) - rng.uniform(0.5, 0.9)) / 0.3, 0, 1) * rng.uniform(0.04, 0.14)
+        ramp = ramp[::-1] if rng.random() < 0.5 else ramp
+        arr = arr * np.stack([1 - ramp, 1 - ramp, np.ones_like(ramp)], axis=-1)[None]
+    if rng.random() < 0.6 * level:
+        arr = arr * _gradient(*arr.shape[:2], rng, 0.3 * level)[..., None]
+    contrast = rng.uniform(0.8, 1.15)
+    arr = (arr - 128.0) * contrast + 128.0 + rng.uniform(-15, 10)
+    if rng.random() < 0.5 * level:
+        arr = arr + np.random.default_rng(rng.getrandbits(32)).normal(0, rng.uniform(2, 9), arr.shape[:2])[..., None]
+    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
+
+    if rng.random() < 0.9:  # compression happens at scan resolution, before anything is enlarged
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=rng.randint(35, 88))
+        img = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+    return img

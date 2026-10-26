@@ -44,3 +44,16 @@ def test_extra_shard_keeps_first_run_and_validation(tmp_path):
     assert {f: (tmp_path / "rec/synth_lines" / f).read_bytes() for f in first} == first and image.read_bytes() == before
     assert (tmp_path / "rec/synth_lines_r2/images/00000000.jpg").exists()
     assert all(l.startswith("synth_lines_r2/") for l in (tmp_path / "rec/synth_lines_r2/train.txt").read_text(encoding="utf-8").splitlines())
+
+
+def test_scan_profile_makes_small_italic_rich_lines(tmp_path):
+    stats = synth_lines.build(tmp_path / "rec", _corpus(tmp_path), FONTS, 40, workers=1, val_ratio=0.0, profile="scan", shard="synth_lines_scan")
+    assert stats["train"] >= 30
+    allowed = set(charset.build_charset()) | {" "}
+    heights = []
+    for line in (tmp_path / "rec/synth_lines_scan/train.txt").read_text(encoding="utf-8").splitlines():
+        rel, text = line.split("\t")
+        assert set(text) <= allowed and rel.startswith("synth_lines_scan/")
+        heights.append(Image.open(tmp_path / "rec" / rel).height)
+    # scan resolution: a line is about 30 px high (22-34 px type plus margin), where the standard profile makes 24-56 px type
+    assert 20 <= sorted(heights)[len(heights) // 2] <= 55 and max(heights) < 80

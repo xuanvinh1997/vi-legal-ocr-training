@@ -10,9 +10,11 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image
+
 from . import charset, corpus, legal_text
 from .common import is_val, rng_for, run_parallel, write_lines
-from .degrade import degrade
+from .degrade import degrade, degrade_scan
 from .fonts import Family, ensure_fonts, pick
 from .render import load_font, render_line
 
@@ -32,6 +34,7 @@ class LineJob:
     val_ratio: float
     level: float
     shard: str
+    profile: str = "standard"
 
 
 def sample_text(snippets, rng: random.Random, max_chars: int) -> str:
@@ -62,10 +65,18 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
         if not text:
             continue
         family: Family = pick(families, rng)
-        bold = rng.random() < 0.15
-        italic = rng.random() < 0.08
-        font = load_font(str(family.path(bold, italic)), rng.randint(24, 56))
-        img = degrade(render_line(text, font, rng), rng, job.level)
+        if job.profile == "scan":
+            # Rendered at 2-3x and shrunk to scan resolution (22-34 px type, so a line is about 30 px high); legal text is set in
+            # italics far more often than the standard profile has it (the "Căn cứ ..." paragraphs).
+            bold, italic, factor = rng.random() < 0.12, rng.random() < 0.30, rng.choice((2, 3))
+            font = load_font(str(family.path(bold, italic)), rng.randint(22, 34) * factor)
+            big = render_line(text, font, rng)
+            img = degrade_scan(big.resize((max(8, round(big.width / factor)), max(8, round(big.height / factor))), Image.LANCZOS), rng, job.level)
+        else:
+            bold = rng.random() < 0.15
+            italic = rng.random() < 0.08
+            font = load_font(str(family.path(bold, italic)), rng.randint(24, 56))
+            img = degrade(render_line(text, font, rng), rng, job.level)
         rel = f"{job.shard}/images/{n:08d}.jpg"
         img.save(Path(job.root) / rel, quality=rng.randint(85, 95))
         (val if is_val(str(n), job.val_ratio) else train).append(f"{rel}\t{text}")
@@ -74,12 +85,12 @@ def _work(job: LineJob) -> tuple[list[str], list[str]]:
 
 def build(root: str | Path, corpus_path: str | Path, fonts_dir: str | Path, count: int, *, workers: int = 2,
           seed: int = 0, max_chars: int = 100, val_ratio: float = 0.01, level: float = 1.0,
-          extra_fonts: list[str] = (), shard: str = SHARD) -> dict[str, int]:
-    """`shard` + a new `seed` add data next to an earlier run instead of overwriting it; `val_ratio=0` keeps the validation set unchanged."""
+          extra_fonts: list[str] = (), shard: str = SHARD, profile: str = "standard") -> dict[str, int]:
+    """`profile="scan"` renders lines at scan resolution with a detector crop's margin and artefacts (see degrade.degrade_scan). `shard` + a new `seed` add data next to an earlier run instead of overwriting it; `val_ratio=0` keeps the validation set unchanged."""
     ensure_fonts(fonts_dir, list(extra_fonts))  # download once, before the workers race for it
     shards = max(1, workers * 4)
     per = -(-count // shards)
-    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level, shard) for i in range(shards)]
+    jobs = [LineJob(i, per, str(root), str(corpus_path), str(fonts_dir), list(extra_fonts), seed, max_chars, val_ratio, level, shard, profile) for i in range(shards)]
     results = run_parallel(_work, jobs, workers)
     train = [l for t, _ in results for l in t]
     val = [l for _, v in results for l in v]
