@@ -122,6 +122,36 @@ python scripts/run_pdf.py "tests/<file>.pdf" --models <thư mục model> --out <
 
 Cần onnxruntime, opencv, pyclipper (như `services/ocr`), PyMuPDF và RapidFuzz. Model cũ (trước r3) cho CER 3,0% và đọc sai 47% chữ dấu mũ + dấu thanh; `--unclip 2.0` nới khung chữ để giữ dấu nặng dưới chữ. Chỉ có 3 trang, nên đây là phép đo để so các lần train với nhau, không phải độ chính xác tổng quát.
 
+## VietOCR (recogniser thứ hai, chạy trên Colab cạnh PaddleOCR)
+
+Tinh chỉnh [VietOCR](https://github.com/pbcquoc/vietocr) (`vgg_transformer`: VGG19-BN + Transformer) trên **cùng dữ liệu** `rec/` và từ điển `vi_compact` với recogniser của Paddle, nên hai mô hình chấm được trên cùng các dòng giữ lại bằng cùng chỉ số (CER, CER bỏ dấu thanh, tỉ lệ lỗi do dấu thanh). Mở [notebooks/vietocr_finetune.ipynb](notebooks/vietocr_finetune.ipynb) trên Colab, hoặc chạy [scripts/run_vietocr.sh](scripts/run_vietocr.sh) (notebook gọi đúng script này theo từng pha: `setup data config baseline train eval export`). Không cần virtualenv: chỉ cần PyTorch có sẵn trên Colab. `data.tar`/`data.zip` đã dựng cho Paddle được khôi phục và dùng lại nguyên vẹn.
+
+```
+PHASES="setup data config baseline train eval export" bash scripts/run_vietocr.sh
+python -m ocr_train config-vietocr --help      # config-vietocr, train-vietocr, eval-vietocr, export-vietocr
+```
+
+| Vấn đề của VietOCR nguyên bản | Cách xử lý ở đây |
+|---|---|
+| Từ vựng 229 ký tự, thiếu `§ № ₫ ‘ ’ “ ” – — …` và chữ Latin-1 (tên nước ngoài): decoder không thể viết ra | Từ vựng = của VietOCR + các ký tự còn thiếu của `vi_compact` **nối vào cuối** (id cũ không đổi). `expand_state` chép hàng embedding và hàng đầu ra đã huấn luyện; chữ mới khởi tạo từ chữ gốc bỏ dấu (ế ← ê, Ä ← A) cộng nhiễu, các chữ còn lại ngẫu nhiên |
+| `Trainer` import `imgaug` ở mức module (hỏng với numpy 2 của Colab) | Vòng huấn luyện riêng ([ocr_train/vietocr_train.py](ocr_train/vietocr_train.py)); `vietocr==0.3.13` cài bằng `--no-deps`, chỉ dùng model, vocab, resize và bộ giải mã tham lam của nó |
+| Không bao giờ ghi checkpoint (`save_checkpoint` không được gọi), resume dựng optimizer sai | `latest.pt` (model + optimizer + scheduler + scaler + bước), ghi nguyên tử mỗi `VOCR_SAVE` bước; `RESUME=1` tiếp tục đúng lịch của lần chạy bị ngắt |
+| Cache LMDB chỉ dựng khi thư mục chưa có: thêm dữ liệu mà không xóa thì bị bỏ qua âm thầm | Đọc ảnh trực tiếp từ `train_list_wh.txt`, không cache |
+| Chọn model tốt nhất theo độ chính xác cả dòng | Chọn theo CER trên đúng `VOCR_METRICS` dòng giữ lại mỗi lần |
+| Encoder không có padding mask | Batch gom theo độ rộng đã resize (như sampler của VietOCR), giữ cả batch cuối ngắn hơn: đó là các dòng dài hiếm, không nên bỏ |
+| Ảnh rộng tối đa 512 px: dòng pháp lý dài ~100 ký tự bị ép ngang | `image_max_width` = dòng rộng nhất của dữ liệu (≈ 1070 px ở chiều cao 32); mã chặn cấu hình vượt 1024 vị trí của positional encoding (tối đa 2048 px ở chiều cao 32, 1364 px ở 48) |
+
+Vòng 2: `INIT_FROM=<configs/vietocr.yml>` + `VOCR_TAG` mới bắt đầu từ `best.pth` của vòng 1 (cùng từ vựng và cỡ ảnh, chỉ nạp trọng số, lịch mới) và không ghi đè vòng 1. `RESUME=1` thì khác: tiếp tục một lần chạy bị ngắt.
+
+Kết quả xuất ra `export/<tag>/{weights.pth,config.yml}` nạp được bằng `vietocr.tool.predictor.Predictor` (đặt `weights` là đường dẫn tuyệt đối). VietOCR đọc **một dòng** mỗi lần, dòng đến từ bộ phát hiện chữ (det của Paddle hoặc khác).
+
+**Đã kiểm chứng:** trên CPU với trọng số `vgg_transformer.pth` thật và bộ 88 dòng giả: nạp trọng số + mở rộng từ vựng, train, ngắt giữa chừng rồi `--resume` (bước và learning rate nối đúng), đánh giá, export và nạp lại bằng `Predictor`; `run_vietocr.sh` chạy hết các pha; 19 unit test (`OCR_TEST_VIETOCR=1` bật bài test train-resume-export trên CPU). Forward và giải mã chạy được dưới autocast bf16 trên CPU.
+**Chưa kiểm chứng:** chạy trên GPU (AMP bf16/fp16 và GradScaler, tốc độ, bộ nhớ ở batch 32 × 1100 px), mọi con số độ chính xác trên dữ liệu thật, và `--lr-scale 0.4` (đặt theo recogniser Paddle, chưa dò). Chiều cao ảnh khác 32 chưa thử: trọng số có sẵn học ở 32.
+
+## Unlimited-OCR
+
+[unlimited_ocr/](unlimited_ocr/) hiện chỉ chạy trên Mac (MPS) và chưa có notebook Colab.
+
 ## Test
 
 ```bash

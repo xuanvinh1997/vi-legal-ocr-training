@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import charset, corpus, dataset, english, evaluate, export, head_surgery, paddle_cfg, pdf_labels, public_sets, synth_lines, synth_pages
+from . import charset, corpus, dataset, english, evaluate, export, head_surgery, paddle_cfg, pdf_labels, public_sets, synth_lines, synth_pages, vietocr_cfg
 
 
 def _data(args) -> Path:
@@ -145,6 +145,57 @@ def cmd_eval_rec(args):
         print(f"  [{d}] {ref!r}\n       {hyp!r}")
 
 
+def cmd_config_vietocr(args):
+    """The VietOCR counterpart of config-rec: reads the same merged `rec/` lists, writes one YAML for `train-vietocr`."""
+    rec = _data(args).resolve() / "rec"
+    train_list = args.train_list or ("train_list_wh.txt" if (rec / "train_list_wh.txt").exists() else "train_list.txt")
+    base_vocab, pretrained, height, max_chars = vietocr_cfg.DEFAULT_VOCAB, args.pretrained or vietocr_cfg.PRETRAIN_URL, args.height, args.max_chars
+    init_vocab = base_vocab
+    if args.like:  # continue from an earlier run: its vocabulary (extended if the dictionary grew), its weights, its image size
+        prev = vietocr_cfg.read_config(args.like)
+        base_vocab = init_vocab = prev["vocab"]
+        pretrained = args.pretrained or prev["weights"]
+        height = args.height or prev["dataset"]["image_height"]
+        max_chars = args.max_chars or prev["trainer"]["max_chars"]
+    height, max_chars = height or 32, max_chars or 126
+    vocab = vietocr_cfg.build_vocab(charset.read_dict(args.dict), base_vocab)
+    max_width = args.max_width
+    if not max_width:
+        samples = vietocr_cfg.read_list(rec / train_list)
+        if not any(s[2] for s in samples):
+            raise SystemExit(f"{rec / train_list} has no image sizes: run `merge` (it writes train_list_wh.txt) or pass --max-width")
+        max_width = vietocr_cfg.suggest_max_width(samples, height)
+        print(f"widest line at height {height}: {max_width}px (the positional encoding fits {vietocr_cfg.max_width_for(height)})")
+    cfg = vietocr_cfg.build_config(
+        vocab=vocab, data_root=str(rec), train_list=train_list, val_list=args.val_list, save_dir=str(Path(args.save_dir).resolve()), pretrained=pretrained,
+        pretrained_vocab=init_vocab, epochs=args.epochs, batch_size=args.batch_size, image_height=height, image_max_width=max_width,
+        max_lr=3e-4 * args.lr_scale, max_chars=max_chars, workers=args.workers, valid_every=args.valid_every, save_every=args.save_every,
+        metrics=args.metrics, print_every=args.print_every, mask_prob=args.mask_prob, device="cpu" if args.cpu else "cuda:0", amp=not args.no_amp)
+    print(vietocr_cfg.write_config(cfg, args.out), f"(vocabulary {len(vocab)} characters, {len(vocab) - len(base_vocab)} added)")
+
+
+def cmd_train_vietocr(args):
+    from . import vietocr_train  # torch + vietocr, imported only here so the data commands run without them
+
+    print(vietocr_train.train(vietocr_cfg.read_config(args.config), resume=args.resume))
+
+
+def cmd_eval_vietocr(args):
+    from . import vietocr_train
+
+    cfg = vietocr_cfg.read_config(args.config)
+    report = vietocr_train.evaluate_weights(cfg, args.weights or cfg["weights"], args.list, limit=args.limit)
+    print(report.summary())
+    for d, ref, hyp in report.worst[:8]:
+        print(f"  [{d}] {ref!r}\n       {hyp!r}")
+
+
+def cmd_export_vietocr(args):
+    from . import vietocr_train
+
+    print(vietocr_train.export(vietocr_cfg.read_config(args.config), args.out))
+
+
 def cmd_export_all(args):
     """Paddle inference model + ONNX for everything that was trained. Run it with a CPU build of Paddle (see export.export_inference)."""
     out, exp, cfg = Path(args.out), Path(args.out) / "export", Path(args.out) / "configs"
@@ -223,6 +274,28 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--like", help="an earlier rec config: reuse its input width and max_text_length (needed to continue its checkpoint)")
             s.add_argument("--rec-aug", action="store_true", help="keep PaddleOCR's RecAug (slower on few CPU cores; the data is already degraded)")
             s.add_argument("--fixed-width", action="store_true", help="pad every line to --img-w instead of grouping batches by width")
+    s = add("config-vietocr", cmd_config_vietocr, "write a VietOCR fine-tuning config (VGG19-BN + Transformer) for the merged rec/ data")
+    s.add_argument("--dict", required=True, help="the dictionary the data was checked against; its characters VietOCR lacks are appended to the vocabulary")
+    s.add_argument("--out", required=True), s.add_argument("--save-dir", required=True)
+    s.add_argument("--pretrained", help="weights to start from: a file or URL (default: VietOCR's vgg_transformer.pth)")
+    s.add_argument("--like", help="an earlier VietOCR config: start from its best weights and keep its vocabulary and image size")
+    s.add_argument("--train-list"), s.add_argument("--val-list", default="val_list.txt")
+    s.add_argument("--epochs", type=int, default=6), s.add_argument("--batch-size", type=int, default=32), s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--height", type=int, help="image height, a multiple of 16 (default 32 as VietOCR; taller shows tone marks better but the pretrained weights saw 32)")
+    s.add_argument("--max-width", type=int, help="default: the widest line of the data, so none is squeezed")
+    s.add_argument("--max-chars", type=int, help="longest label kept (default 126, the decoder runs 128 steps)")
+    s.add_argument("--lr-scale", type=float, default=0.4, help="times VietOCR's 3e-4 peak rate (not tuned)")
+    s.add_argument("--valid-every", type=int, default=2000), s.add_argument("--save-every", type=int, default=2000), s.add_argument("--print-every", type=int, default=100)
+    s.add_argument("--metrics", type=int, default=1500, help="validation lines decoded at each check (the same ones every time)")
+    s.add_argument("--mask-prob", type=float, default=0.05, help="share of input characters hidden during training (VietOCR's masked-LM trick)")
+    s.add_argument("--cpu", action="store_true"), s.add_argument("--no-amp", action="store_true", help="train in float32 on the GPU too")
+    s = add("train-vietocr", cmd_train_vietocr, "fine-tune VietOCR from a config-vietocr file")
+    s.add_argument("--config", required=True), s.add_argument("--resume", action="store_true", help="continue `latest.pt` of an interrupted run (same schedule)")
+    s = add("eval-vietocr", cmd_eval_vietocr, "CER / tone-error report of VietOCR weights on a list file (the stock model works: --weights <url>)")
+    s.add_argument("--config", required=True), s.add_argument("--weights", help="default: the config's best.pth")
+    s.add_argument("--list", default="val_list.txt"), s.add_argument("--limit", type=int, default=1500)
+    s = add("export-vietocr", cmd_export_vietocr, "copy the best weights and a serving config to a directory")
+    s.add_argument("--config", required=True), s.add_argument("--out", required=True)
     s = add("surgery", cmd_surgery, "carry pretrained recogniser weights over to a new dictionary")
     s.add_argument("--pretrained", required=True), s.add_argument("--old-dict", required=True), s.add_argument("--new-dict", required=True), s.add_argument("--out", required=True)
     s = add("export-all", cmd_export_all, "export trained models to Paddle inference + ONNX")

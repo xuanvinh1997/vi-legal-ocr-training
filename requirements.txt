@@ -7,3 +7,4 @@ pyyaml
 fonttools
 rapidfuzz
 datasets
+# VietOCR (run_vietocr.sh): torch, torchvision, einops, gdown, requests, tqdm, and `pip install --no-deps vietocr==0.3.13` (see pyproject.toml)

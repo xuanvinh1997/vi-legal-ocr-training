@@ -15,6 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# VietOCR fine-tuning (scripts/run_vietocr.sh). Also needs torch + torchvision (Colab has them) and `pip install --no-deps vietocr==0.3.13`:
+# vietocr's own dependency list pins imgaug, which does not import on numpy 2, and the part of vietocr that uses it is not used here.
+vietocr = ["einops", "gdown", "requests", "tqdm"]
 
 [build-system]
 requires = ["setuptools>=64"]
